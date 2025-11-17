@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+.idea/
+
+Data/*
+!Data/.gitkeep
