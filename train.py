@@ -1,11 +1,13 @@
+from sklearn.metrics import average_precision_score
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, random_split
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm 
-from config import DEVICE, model_save_path, SCHEDULER_TYPE, STEP_SIZE, GAMMA, WARMUP_RATIO, EPOCHS, \
+from config import DEVICE, model_save_path, SCHEDULER_TYPE, GAMMA, WARMUP_RATIO, EPOCHS, \
                     lstm_hidden, lstm_layers, linear_hidden_dim, classifier_hidden_dim, learning_rate, weight_decay, \
                     BATCH_SIZE, VAL_RATIO, log_step, val_step
+from loss import ASL
 from lr_schedule import get_scheduler
 from load_data import load_data
 import numpy as np
@@ -45,108 +47,135 @@ def collate_fn(batch):
     labels = torch.stack(labels)
     return seqs_padded, features, labels
 
-# --- Training function ---
-def train_model(model, train_dataloader, val_dataloader=None, criterion=None,
-                optimizer=None, scheduler=None, num_epochs=10, device='cuda',
-                log_step=50, val_step=500, model_save_path='best_model.pt'):
+class Trainer:
+    def __init__(self, model, train_dataloader, val_dataloader=None,
+                 criterion=None, optimizer=None, scheduler=None,
+                 device='cuda', log_step=50, val_step=500,
+                 model_save_path='best_model.pt'):
+        self.model = model
+        self.train_dataloader = train_dataloader
+        self.val_dataloader = val_dataloader
+        self.criterion = criterion
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.device = device
+        self.log_step = log_step
+        self.val_step = val_step
+        self.model_save_path = model_save_path
 
-    model.to(device)
-    best_val_loss = float('inf')
-    global_step = 0
+        self.best_val_score = float('inf')
+        self.global_step = 0
 
-    for epoch in range(num_epochs):
-        model.train()
-        running_loss = 0.0
-        loop = tqdm(total=len(train_dataloader), desc=f"Epoch {epoch+1}/{num_epochs}", unit="batch", ncols=100)
+        self.model.to(self.device)
 
-        for batch_idx, (seq_ids, features, labels) in enumerate(train_dataloader):
-            global_step += 1
+        # Tổng số tham số
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-            seq_ids = seq_ids.to(device)
-            features = features.to(device)
-            labels = labels.to(device)
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
 
-            optimizer.zero_grad()
-            outputs = model(seq_ids, features)
-            loss = criterion(outputs, labels)
-            loss.backward()
+    def get_loss(self, batch):
+        seq_ids, features, labels = batch
+        seq_ids = seq_ids.to(self.device)
+        features = features.to(self.device)
+        labels = labels.to(self.device)
 
-            # tính grad norm
-            total_norm = 0.0
-            for p in model.parameters():
-                if p.grad is not None:
-                    param_norm = p.grad.data.norm(2)
-                    total_norm += param_norm.item() ** 2
-            total_norm = total_norm ** 0.5
+        outputs = self.model(seq_ids, features)
+        loss = self.criterion(outputs, labels)
+        
+        return loss
 
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
+    def train(self, num_epochs=10):
+        for epoch in range(num_epochs):
+            self.model.train()
+            running_loss = 0.0
+            loop = tqdm(total=len(self.train_dataloader), desc=f"Epoch {epoch+1}/{num_epochs}",
+                        unit="it", ncols=100)
 
-            running_loss += loss.item() * seq_ids.size(0)
+            for batch_idx, batch in enumerate(self.train_dataloader):
+                self.global_step += 1
 
-            # --- cập nhật tqdm và log chỉ mỗi log_step ---
-            if global_step % log_step == 0:
-                avg_loss = running_loss / ((batch_idx + 1) * train_dataloader.batch_size)
-                loop.set_postfix(loss=avg_loss, grad_norm=total_norm, lr=optimizer.param_groups[0]['lr'])
-                loop.update(log_step)
+                self.optimizer.zero_grad()
+                loss = self.get_loss(batch)
+                loss.backward()
 
-            # --- validation theo val_step ---
-            if val_dataloader is not None and global_step % val_step == 0:
-                model.eval()
-                val_loss = 0.0
-                with torch.no_grad():
-                    for seq_ids_val, features_val, labels_val in val_dataloader:
-                        seq_ids_val = seq_ids_val.to(device)
-                        features_val = features_val.to(device)
-                        labels_val = labels_val.to(device)
+                # --- grad norm ---
+                total_norm = 0.0
+                for p in self.model.parameters():
+                    if p.grad is not None:
+                        total_norm += (p.grad.data.norm(2).item()) ** 2
+                total_norm = total_norm ** 0.5
 
-                        outputs_val = model(seq_ids_val, features_val)
-                        loss_val = criterion(outputs_val, labels_val)
-                        val_loss += loss_val.item() * seq_ids_val.size(0)
+                self.optimizer.step()
+                if self.scheduler is not None:
+                    self.scheduler.step()
 
-                epoch_val_loss = val_loss / len(val_dataloader.dataset)
-                print(f"\nStep {global_step}: Val Loss: {epoch_val_loss:.4f}")
+                running_loss += loss.item() * batch[0].size(0)
 
-                # lưu model nếu tốt hơn
-                if epoch_val_loss < best_val_loss:
-                    best_val_loss = epoch_val_loss
-                    torch.save(model.state_dict(), model_save_path)
-                    print(f"Step {global_step}: New best model saved with val loss {best_val_loss:.4f}")
+                # --- logging ---
+                if self.global_step % self.log_step == 0:
+                    avg_loss = running_loss / ((batch_idx + 1) * self.train_dataloader.batch_size)
+                    current_lr = self.optimizer.param_groups[0]['lr']
+                    tqdm.write(f"Step {self.global_step}\tTrain Loss: {avg_loss:.4f}\t"
+                               f"Grad Norm: {total_norm:.4f}\tLR: {current_lr:.6f}")
 
-                model.train()  # trở lại train mode
+                loop.update(1)
 
-        # --- log cuối epoch ---
-        epoch_train_loss = running_loss / len(train_dataloader.dataset)
-        if val_dataloader is not None:
-            # tính val loss cuối epoch
-            model.eval()
-            val_loss = 0.0
-            with torch.no_grad():
-                for seq_ids_val, features_val, labels_val in val_dataloader:
-                    seq_ids_val = seq_ids_val.to(device)
-                    features_val = features_val.to(device)
-                    labels_val = labels_val.to(device)
+                # --- validation ---
+                if self.val_dataloader is not None and self.global_step % self.val_step == 0:
+                    self.validate_and_save()
 
-                    outputs_val = model(seq_ids_val, features_val)
-                    loss_val = criterion(outputs_val, labels_val)
-                    val_loss += loss_val.item() * seq_ids_val.size(0)
-            epoch_val_loss = val_loss / len(val_dataloader.dataset)
+            # --- cuối epoch ---
+            epoch_train_loss = running_loss / len(self.train_dataloader.dataset)
+            if self.val_dataloader is not None:
+                epoch_val_loss = self.validate_and_save()
+                print(f"Epoch {epoch+1}/{num_epochs} finished, "
+                      f"Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_val_loss:.4f}")
+            else:
+                print(f"Epoch {epoch+1}/{num_epochs} finished, Train Loss: {epoch_train_loss:.4f}")
 
-            print(f"Epoch {epoch+1}/{num_epochs} finished, "
-                  f"Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_val_loss:.4f}")
+            loop.close()
 
-            if epoch_val_loss < best_val_loss:
-                best_val_loss = epoch_val_loss
-                torch.save(model.state_dict(), model_save_path)
-                print(f"Epoch {epoch+1}: New best model saved with val loss {best_val_loss:.4f}")
-        else:
-            print(f"Epoch {epoch+1}/{num_epochs} finished, Train Loss: {epoch_train_loss:.4f}")
+        return self.model
 
-        loop.close()
+    def validate_and_save(self):
+        self.model.eval()
 
-    return model
+        all_labels = []
+        all_probs = []
 
+        with torch.no_grad():
+            for batch in self.val_dataloader:
+                seq_ids, features, labels = batch
+                seq_ids = seq_ids.to(self.device)
+                features = features.to(self.device)
+                labels = labels.to(self.device)
+
+                # output shape: (batch_size, num_labels)
+                logits = self.model(seq_ids, features)
+                probs = torch.sigmoid(logits)
+
+                all_labels.append(labels.cpu().numpy())
+                all_probs.append(probs.cpu().numpy())
+
+        # ghép tất cả batch lại
+        all_labels = np.concatenate(all_labels, axis=0)
+        all_probs = np.concatenate(all_probs, axis=0)
+
+        # --- Tính mAP ---
+        # dùng macro để không bias label nhiều/no-label
+        mAP = average_precision_score(all_labels, all_probs, average="macro")
+
+        # --- Lưu model nếu tốt hơn ---
+        if mAP > self.best_val_score:   
+            self.best_val_score = mAP
+            torch.save(self.model.state_dict(), self.model_save_path)
+            tqdm.write(f"Step {self.global_step}: New best model saved with mAP {self.best_val_score:.4f}")
+
+        self.model.train()
+        return mAP
+    
 # --- Main ---
 if __name__ == "__main__":
     from HybridModel import HybridModel
@@ -179,39 +208,30 @@ if __name__ == "__main__":
         linear_hidden_dim=linear_hidden_dim,
         classifier_hidden_dim=classifier_hidden_dim,
     )
-    # Tổng số tham số
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
-
-    criterion = nn.BCEWithLogitsLoss()  # multi-label
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    criterion=ASL()
+    optimizer=optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     # --- tính tổng step ---
     total_steps = len(dataloader) * EPOCHS  # số batch mỗi epoch × số epoch
 
-    # scheduler với warm-up ratio
     scheduler = get_scheduler(
         optimizer, 
         scheduler_type=SCHEDULER_TYPE, 
         total_steps=total_steps,      # truyền tổng step
         warmup_ratio=WARMUP_RATIO,             # ví dụ 10% tổng step là warm-up
-        step_size=STEP_SIZE,
         gamma=GAMMA
     )
-
-    trained_model = train_model(
-        model, 
-        train_loader, 
-        val_loader,
-        criterion, 
-        optimizer, 
-        scheduler,
-        num_epochs=EPOCHS, 
-        device=DEVICE, 
+    trainer = Trainer(
+        model,
+        train_dataloader=train_loader,
+        val_dataloader=val_loader,
+        criterion=criterion,  # multi-label,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        device=DEVICE,
         log_step=log_step,
         val_step=val_step,
         model_save_path=model_save_path
     )
+
+    trained_model = trainer.train(num_epochs=EPOCHS)

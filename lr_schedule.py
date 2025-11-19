@@ -1,88 +1,66 @@
 # learning_rate_schedule.py
+import math
 import torch
 
-class WarmupScheduler(torch.optim.lr_scheduler.LRScheduler):
+class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
     """
-    Warm-up theo ratio kết hợp với scheduler gốc.
+    Warmup theo ratio + step-based decay (linear, cosine, exponential)
     """
-    def __init__(self, optimizer, total_steps, warmup_ratio=0.1, base_scheduler=None, last_epoch=-1):
+    def __init__(self, optimizer, total_steps, warmup_ratio=0.1,
+                 scheduler_type="cosine", gamma=0.1, final_lr_ratio=0.0, last_epoch=-1):
         """
         Args:
-            optimizer: torch.optim.Optimizer
-            total_steps: tổng số step (batches * epochs)
+            optimizer: optimizer
+            total_steps: tổng step (batch*epoch)
             warmup_ratio: tỉ lệ warm-up (0~1)
-            base_scheduler: scheduler gốc (có thể None)
+            scheduler_type: "linear", "cosine", "exponential"
+            gamma: dùng cho exponential decay
+            final_lr_ratio: lr cuối / lr_max (linear/cosine)
         """
         self.total_steps = total_steps
-        self.warmup_steps = int(total_steps * warmup_ratio)
-        self.base_scheduler = base_scheduler
+        self.warmup_steps = max(1, int(total_steps * warmup_ratio))
+        self.scheduler_type = scheduler_type.lower()
+        self.gamma = gamma
+        self.final_lr_ratio = final_lr_ratio
         super().__init__(optimizer, last_epoch)
 
     def get_lr(self):
-        if self.last_epoch < self.warmup_steps:
-            # linear warm-up: tăng từ 0 → lr_max
-            return [base_lr * (self.last_epoch + 1) / self.warmup_steps for base_lr in self.base_lrs]
-        else:
-            if self.base_scheduler is None:
-                return [base_lr for base_lr in self.base_lrs]
-            # base scheduler tính LR theo step
-            return self.base_scheduler.get_last_lr()
+        step = self.last_epoch + 1
+        lrs = []
+        for base_lr in self.base_lrs:
+            if step <= self.warmup_steps:
+                # linear warmup
+                lr = base_lr * step / self.warmup_steps
+            else:
+                decay_step = step - self.warmup_steps
+                decay_total = self.total_steps - self.warmup_steps
+                if self.scheduler_type == "linear":
+                    lr = base_lr - (base_lr - base_lr * self.final_lr_ratio) * decay_step / decay_total
+                elif self.scheduler_type == "cosine":
+                    lr = base_lr * 0.5 * (1 + math.cos(math.pi * decay_step / decay_total))
+                    lr = max(lr, base_lr * self.final_lr_ratio)
+                elif self.scheduler_type == "exponential":
+                    lr = base_lr * (self.gamma ** decay_step)
+                else:
+                    raise ValueError(f"Scheduler type {self.scheduler_type} not supported")
+            lrs.append(lr)
+        return lrs
 
     def step(self, epoch=None):
-        # tăng step
         super().step(epoch)
-        # nếu base_scheduler có, advance base scheduler sau warm-up
-        if self.base_scheduler is not None and self.last_epoch >= self.warmup_steps:
-            self.base_scheduler.step(epoch)
 
-
-def get_scheduler(optimizer, scheduler_type="step", total_steps=None, warmup_ratio=0.0, **kwargs):
-    """
-    Trả về scheduler với warm-up theo ratio.
-
-    Args:
-        optimizer: torch.optim.Optimizer
-        scheduler_type: "step", "cosine", "exponential", "reduce_on_plateau"
-        total_steps: tổng số step (batch * epochs), cần nếu warmup_ratio>0
-        warmup_ratio: tỉ lệ warm-up (0~1)
-        kwargs: tham số cho scheduler gốc
-    """
+# Example usage
+def get_scheduler(optimizer, scheduler_type="linear", total_steps=None,
+                  warmup_ratio=0.1, gamma=0.95, final_lr_ratio=0.0):
+    if total_steps is None:
+        raise ValueError("total_steps must be provided")
+    
     scheduler_type = scheduler_type.lower()
-
-    if scheduler_type == "step":
-        step_size = kwargs.get("step_size", 10)
-        gamma = kwargs.get("gamma", 0.1)
-        base_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
-
-    elif scheduler_type == "cosine":
-        T_max = kwargs.get("T_max", 50)
-        base_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_max)
-
-    elif scheduler_type == "exponential":
-        gamma = kwargs.get("gamma", 0.95)
-        base_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
-
-    elif scheduler_type == "reduce_on_plateau":
-        mode = kwargs.get("mode", "min")
-        factor = kwargs.get("factor", 0.1)
-        patience = kwargs.get("patience", 5)
-        base_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode=mode, factor=factor, patience=patience, verbose=True
-        )
-    else:
-        raise ValueError(f"Scheduler type '{scheduler_type}' not supported!")
-
-    # Wrap với warm-up ratio nếu cần
-    if warmup_ratio > 0 and scheduler_type != "reduce_on_plateau":
-        if total_steps is None:
-            raise ValueError("total_steps must be provided when using warmup_ratio>0")
-        scheduler = WarmupScheduler(optimizer, total_steps=total_steps,
-                                    warmup_ratio=warmup_ratio, base_scheduler=base_scheduler)
-    else:
-        scheduler = base_scheduler
-
+    scheduler = WarmupScheduler(
+        optimizer, total_steps=total_steps, warmup_ratio=warmup_ratio,
+        scheduler_type=scheduler_type, gamma=gamma, final_lr_ratio=final_lr_ratio
+    )
     return scheduler
-
 
 # ===========================
 # Example usage

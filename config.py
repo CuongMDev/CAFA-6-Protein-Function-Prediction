@@ -24,8 +24,7 @@ weight_decay=1e-4
 log_step=100
 val_step=3000
 
-SCHEDULER_TYPE="step"
-STEP_SIZE=5
+SCHEDULER_TYPE="cosine"
 GAMMA=0.5
 WARMUP_RATIO=0.1
 EPOCHS = 5
