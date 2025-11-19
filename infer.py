@@ -16,7 +16,7 @@ def infer(model, seq_ids, features, device):
         outputs = model(seq_ids, features)
     
     
-    outputs = torch.softmax(outputs, dim=-1)
+    outputs = torch.sigmoid(outputs)
     return outputs
 
 if __name__ == "__main__":

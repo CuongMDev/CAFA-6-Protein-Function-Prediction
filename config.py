@@ -13,12 +13,24 @@ obo_file = f"{data_dir}Train/go-basic.obo"
 
 model_save_path = f"{model_dir}/hybrid_model.pth"
 
+# model
+lstm_hidden=256
+lstm_layers=4
+linear_hidden_dim=256
+classifier_hidden_dim=256
+learning_rate=0.001
+weight_decay=1e-4
+
+log_step=100
+val_step=3000
 
 SCHEDULER_TYPE="step"
 STEP_SIZE=5
 GAMMA=0.5
-WARMUP_EPOCHS=3
+WARMUP_RATIO=0.1
+EPOCHS = 5
 
-
+BATCH_SIZE = 8
+VAL_RATIO = 0.05
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
