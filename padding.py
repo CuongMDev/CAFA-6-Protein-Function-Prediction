@@ -43,17 +43,8 @@ def collate_fn(batch):
 import torch
 
 def flexible_collate(batch):
-    # kiểm tra batch[0] có labels hay không
-    if len(batch[0]) == 3:
-        seqs, features, labels = zip(*batch)
-        has_labels = False
-    elif len(batch[0]) == 2:
-        seqs, features = zip(*batch)
-        labels = None
-        has_labels = False
-    else:
-        raise ValueError("Batch phải có 2 hoặc 3 phần tử")
-
+    seqs, features = zip(*batch)
+    
     # --- chuyển seqs sang tensor ---
     seqs = [torch.tensor(s, dtype=torch.long) for s in seqs]
     max_len = max(len(s) for s in seqs)
@@ -65,8 +56,4 @@ def flexible_collate(batch):
     # features sang tensor
     features = torch.stack([torch.tensor(f, dtype=torch.float32) for f in features])
 
-    if has_labels:
-        labels = torch.stack([torch.tensor(l, dtype=torch.float32) for l in labels])
-        return seqs_padded, features, labels
-    else:
-        return seqs_padded, features
+    return seqs_padded, features
