@@ -14,8 +14,9 @@ obo_file = f"{data_dir}Train/go-basic.obo"
 model_save_path = f"{model_dir}/hybrid_model.pth"
 
 # model
-lstm_hidden=256
-lstm_layers=4
+transformer_hidden=256,
+transformer_layers=4,
+nhead=8,
 linear_hidden_dim=256
 classifier_hidden_dim=256
 learning_rate=0.001

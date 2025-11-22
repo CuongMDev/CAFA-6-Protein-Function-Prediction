@@ -4,7 +4,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, random_split
 from tqdm import tqdm 
 from config import DEVICE, GRADIENT_ACCUMULATION_STEPS, VAL_BATCH_SIZE, model_save_path, SCHEDULER_TYPE, GAMMA, WARMUP_RATIO, EPOCHS, \
-                    lstm_hidden, lstm_layers, linear_hidden_dim, classifier_hidden_dim, learning_rate, weight_decay, \
+                    transformer_hidden, transformer_layers, nhead, linear_hidden_dim, classifier_hidden_dim, learning_rate, weight_decay, \
                     BATCH_SIZE, VAL_RATIO, log_step, val_step
 from loss import ASL
 from lr_schedule import MyScheduler
@@ -171,8 +171,9 @@ if __name__ == "__main__":
         num_labels=len(term_vocab), 
         vocab_size=len(protein_vocab), 
         linear_input_dim=len(ox_vocab), 
-        lstm_hidden=lstm_hidden,
-        lstm_layers=lstm_layers,
+        transformer_hidden=transformer_hidden,
+        transformer_layers=transformer_layers,
+        nhead=nhead,
         linear_hidden_dim=linear_hidden_dim,
         classifier_hidden_dim=classifier_hidden_dim,
     )
