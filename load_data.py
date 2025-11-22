@@ -1,3 +1,4 @@
+from collections import defaultdict
 import numpy as np
 import pandas as pd
 from config import *
@@ -121,15 +122,13 @@ def build_is_a_graph(terms, term2idx):
         Returns:
             dict: term_id -> danh sách các parent_id
         """
-    graph = [] * len(term2idx)
+    graph = [[] for _ in range(len(term2idx))]
     for t in terms:
         tid = term2idx[t["id"]]
-        parents = []
         if "is_a" in t:
             for x in t["is_a"]:
                 parent_id = x.split(" ! ")[0]
-                parents.append(term2idx[parent_id])
-        graph[tid] = parents
+                graph[tid].append(term2idx[parent_id])
     return graph
 
 
@@ -282,7 +281,7 @@ def build_protein_amino_axit_matrix(fasta_file):
                 # Append protein trước đó
                 if seq_lines:
                     seq_str = "".join(seq_lines)
-                    nums = [ord(c) - ord('A') for c in seq_str if 'A' <= c <= 'Z']
+                    nums = [ord(c) - ord('A') + 1 for c in seq_str if 'A' <= c <= 'Z']
                     protein.append(entry_id)
                     amino_axit.append(nums)
 
@@ -296,14 +295,13 @@ def build_protein_amino_axit_matrix(fasta_file):
         # Append protein cuối cùng
         if seq_lines:
             seq_str = "".join(seq_lines)
-            nums = [ord(c) - ord('A') for c in seq_str if 'A' <= c <= 'Z']
+            nums = [ord(c) - ord('A') + 1 for c in seq_str if 'A' <= c <= 'Z']
             protein.append(entry_id)
             amino_axit.append(nums)
 
     return protein, amino_axit
 
 def build_protein_ox_aminoaxit_test(fasta_file):
-    protein = []
     amino_axit = []
     ox = []
 
@@ -317,10 +315,8 @@ def build_protein_ox_aminoaxit_test(fasta_file):
         if line.startswith('>'):
             # Tách protein ID và OX
             parts = line[1:].split()  # Bỏ dấu '>' và tách
-            protein_id = parts[0] if len(parts) > 0 else ""
             organism = parts[1] if len(parts) > 1 else ""
 
-            protein.append(protein_id)
             ox.append(organism)
 
             # Đọc chuỗi amino acid (có thể nhiều dòng)
@@ -336,127 +332,84 @@ def build_protein_ox_aminoaxit_test(fasta_file):
         else:
             i += 1
 
-    ox_onehot, ox2idx = one_hot(ox)
-
-    return protein, ox_onehot, amino_axit
-
+    return ox, amino_axit
 
 def build_mask(y, n_terms, graph):
     """
-    Vectorized mask creation using NumPy.
-
-    Args:
-        y: list of list of term indices per protein
-        n_terms: total number of terms
-        graph: dict term_idx -> list of parent_idx
-
-    Returns:
-        mask: np.array of shape (n_samples, n_terms), dtype=bool
+    Trả về mask_fn(i) → mask của sample i.
+    
+    y: list[list[int]]
+    graph: list[list[int]], graph[t] = parents of t
     """
-    n_samples = len(y)
 
-    # 1. Convert y to dense array (n_samples, n_terms)
-    y_array = np.zeros((n_samples, n_terms), dtype=bool)
-    for i, terms in enumerate(y):
-        y_array[i, terms] = True
+    # 1) Tìm root terms
+    no_parent_mask = np.array([len(graph[t]) == 0 for t in range(n_terms)], dtype=bool)
 
-    # 2. Build parent adjacency matrix (n_terms, n_terms)
-    # parent_adj[t, p] = True if p is parent of t
-    parent_adj = np.zeros((n_terms, n_terms), dtype=bool)
-    for t, parents in graph.items():
-        if parents:
-            parent_adj[t, parents] = True
+    # 2) parent → children
+    parent_to_children = defaultdict(list)
+    for child, parents in enumerate(graph):
+        for p in parents:
+            parent_to_children[p].append(child)
 
-    # 3. Compute mask
-    # Terms with no parent → train always
-    no_parent_mask = parent_adj.sum(axis=1) == 0  # shape (n_terms,)
+    # 3) Tạo hàm lazy mask
+    def mask_fn(i):
+        """Trả về mask (bool array, shape = (n_terms,)) cho sample i."""
+        terms = y[i]  # các term dương của sample i
+        mask_i = np.zeros(n_terms, dtype=bool)
 
-    # Terms with parents → at least one parent present
-    # y_array: (n_samples, n_terms)
-    # parent_adj: (n_terms, n_terms)
-    # Broadcasting: (n_samples,1,n_terms) & (1,n_terms,n_terms) -> (n_samples,n_terms,n_terms)
-    parent_presence = (y_array[:, np.newaxis, :] & parent_adj[np.newaxis, :, :]).any(axis=2)
+        # Root luôn True
+        mask_i[no_parent_mask] = True
 
-    # Combine with no-parent terms
-    mask = parent_presence | no_parent_mask[np.newaxis, :]
+        # Với mỗi parent nó có → bật children
+        for p in terms:
+            for child in parent_to_children.get(p, []):
+                mask_i[child] = True
 
-    return mask
+        return mask_i
 
+    return mask_fn
 
-def load_data():
-    protein = build_protein_amino_axit_matrix(train_seq_file)
-    terms_name, terms = parse_obo(obo_file)
+def get_vocab():
+    protein_vocab, amino_axit = build_protein_amino_axit_matrix(train_seq_file)
+    terms_vocab, terms = parse_obo(obo_file)
 
     info = build_info_matrix(train_seq_file)
-    ox, ox_vocab = one_hot(info[:, 0])
+    info = info[:, 0]
+    ox_vocab = list(set(info))
+
+    return protein_vocab, amino_axit, terms_vocab, terms, info, ox_vocab
+
+def load_train():
+    protein_vocab, amino_axit, terms_vocab, terms, info, ox_vocab = get_vocab()
+
+    ox, _ = one_hot(info, ox_vocab)
 
     df = pd.read_csv(terms_file, sep="\t")
 
-    x = (protein, ox)
-    y, term2idx = get_terms_per_entryid_hot(df, terms_name)
+    x = (amino_axit, ox)
+    y, term2idx = get_terms_per_entryid_hot(df, terms_vocab)
 
     graph = build_is_a_graph(terms, term2idx)
 
-    mask = build_mask(y, len(terms_name), graph)
+    mask = build_mask(y, len(terms_vocab), graph)
 
-    return *x, y, mask, protein, terms_name, ox_vocab
+    return *x, y, mask, protein_vocab, terms_vocab, ox_vocab
 
 def load_test():
-    protein, ox, amino_axit = build_protein_ox_aminoaxit_test(test_seq_file)
+    protein_vocab, _, terms_vocab, _, _, ox_vocab = get_vocab()
+    protein_vocab, ox, amino_axit = build_protein_ox_aminoaxit_test(test_seq_file)
 
+    ox = one_hot(ox, ox_vocab)
 
     X = (
-        protein,
-        ox,
-        amino_axit
+        protein_vocab,
+        amino_axit,
+        ox
     )
-    terms_name = parse_obo(obo_file)
-
-    return X, terms_name
+    return *X, protein_vocab, terms_vocab, ox_vocab
 
 if __name__ == "__main__":
-    # terms = parse_obo(obo_file)
-    # terms = terms[:1000]
-
-    # ids_np = get_ids_numpy(terms)
-
-    # df = pd.read_csv(terms_file, sep="\t")
-    # entry_ids = df["EntryID"].unique()
-
-    # entry_ids_np = np.array(entry_ids)
-
-    # entryid_term, entryid, matrix = create_entryid_terrm(df, terms)
-    # print(matrix.shape)
-    # print(matrix)
-
-    # term_counts = term_protein_counts(df, terms)  # mỗi protein có bao nhiêu term
-
-    # lst = np.array(term_counts)  # nếu là list, chuyển sang numpy array
-
-    # # Lấy index của 2000 phần tử lớn nhất
-    # top_indices = np.argsort(lst)[-1500:]  # sắp xếp tăng dần → lấy 2000 cuối cùng
-    # top_indices = top_indices[::-1]
-    # print(lst[top_indices])
-
-    # lấy term cuủa bọn top này
-    # chuyển axitamin -> numpy one-hot kiểu A->1 B->2 -> numpy 2d
-    # chuyển pe sv
-    # sort mảng đầu theo thứ tự term nhiều kiểu cột đầu n toàn đc tick
-
-    #get_ancestors = build_ancestor_lookup(graph)
-    #
-    # vocab, vocab_index = build_vocab(terms, get_ancestors)
-    #
-    # print(len(vocab))
-    #
-    # matrix2 = build_embedding_matrix(terms, vocab_index, get_ancestors)
-    #
-    # print(matrix2.shape)
-    # print(matrix2)
-    #
-    # df_pe_sv = build_pe_sv_matrix(train_seq_file)
-    # print(df_pe_sv.head())
-    #
+    build_mask()
 
     #load_data()
     X, terms_name = load_test()

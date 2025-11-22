@@ -2,7 +2,7 @@
 import math
 import torch
 
-class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
+class MyScheduler(torch.optim.lr_scheduler.LRScheduler):
     """
     Warmup theo ratio + step-based decay (linear, cosine, exponential)
     """
@@ -17,10 +17,9 @@ class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
             gamma: dùng cho exponential decay
             final_lr_ratio: lr cuối / lr_max (linear/cosine)
         """
-        self.total_steps = total_steps
-        self.warmup_steps = max(1, int(total_steps * warmup_ratio))
         self.scheduler_type = scheduler_type.lower()
         self.gamma = gamma
+        self.warmup_steps = max(1, int(total_steps * warmup_ratio))
         self.final_lr_ratio = final_lr_ratio
         super().__init__(optimizer, last_epoch)
 
@@ -49,19 +48,6 @@ class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
     def step(self, epoch=None):
         super().step(epoch)
 
-# Example usage
-def get_scheduler(optimizer, scheduler_type="linear", total_steps=None,
-                  warmup_ratio=0.1, gamma=0.95, final_lr_ratio=0.0):
-    if total_steps is None:
-        raise ValueError("total_steps must be provided")
-    
-    scheduler_type = scheduler_type.lower()
-    scheduler = WarmupScheduler(
-        optimizer, total_steps=total_steps, warmup_ratio=warmup_ratio,
-        scheduler_type=scheduler_type, gamma=gamma, final_lr_ratio=final_lr_ratio
-    )
-    return scheduler
-
 # ===========================
 # Example usage
 # ===========================
@@ -77,7 +63,7 @@ if __name__ == "__main__":
     total_steps = total_epochs * steps_per_epoch
 
     # Step scheduler với 10% warm-up
-    scheduler = get_scheduler(optimizer, scheduler_type="step",
+    scheduler = MyScheduler(optimizer, scheduler_type="step",
                               total_steps=total_steps, warmup_ratio=0.1,
                               step_size=3, gamma=0.5)
 

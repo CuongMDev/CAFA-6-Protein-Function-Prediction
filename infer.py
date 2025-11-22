@@ -2,9 +2,9 @@
 import numpy as np
 from HybridModel import HybridModel
 import torch.nn as nn
-from load_data import load_data, info_split
-from padding import collate_fn, flexible_collate
-from config import train_seq_file, lstm_hidden, lstm_layers, linear_hidden_dim, classifier_hidden_dim
+from load_data import load_train, info_split
+from custom_dataset import CustomDataset, collate_fn
+from config import BATCH_SIZE, train_seq_file, lstm_hidden, lstm_layers, linear_hidden_dim, classifier_hidden_dim
 
 
 def load_model(model_path, num_labels, vocab_size, linear_input_dim, device,
@@ -96,16 +96,13 @@ def create_submission(outputs_list, entry_ids, term_vocab, threshold=0.01, outpu
 
 if __name__ == "__main__":
     from config import DEVICE, model_save_path
-    from torch.utils.data import DataLoader, TensorDataset
+    from torch.utils.data import DataLoader
 
-    seq_data, feature_data, labels, protein_vocab, term_vocab, ox_vocab = load_data()
+    protein, seq_data, feature_data, protein_vocab, term_vocab, ox_vocab = load_train()
 
     # Tạo dataset dưới dạng list of tuples
-    dataset = list(zip(seq_data, feature_data, labels))
-
-
-    # dataset = TensorDataset(seq_data, feature_data)
-    dataloader = DataLoader(dataset, batch_size=2, shuffle=False, collate_fn=flexible_collate)
+    dataset = CustomDataset(seq_data, feature_data)
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
 
     # num_labels = len(term_vocab)
     # vocab_size = len(protein_vocab)
@@ -114,7 +111,7 @@ if __name__ == "__main__":
     # model = load_model(model_save_path, num_labels=10, vocab_size=20, linear_input_dim=150, device=DEVICE)
 
     model = HybridModel(
-    num_labels=len(term_vocab), 
+        num_labels=len(term_vocab), 
         vocab_size=len(protein_vocab), 
         linear_input_dim=len(ox_vocab), 
         lstm_hidden=lstm_hidden,
