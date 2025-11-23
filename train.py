@@ -92,28 +92,28 @@ class Trainer:
                     running_loss += loss.item() * batch[0].size(0) * accumulate_steps  # nhân lại
                     update_count += 1
                     loop.update(1)  # update tqdm theo số update, không phải batch
+
+                    # --- logging ---
+                    if update_count % self.log_step == 0:
+                        avg_loss = running_loss / ((batch_idx + 1) * self.train_dataloader.batch_size)
+                        current_lr = self.optimizer.param_groups[0]['lr']
+                        tqdm.write(f"Step {self.global_step}\tTrain Loss: {avg_loss:.7f}\t"
+                                f"Grad Norm: {total_norm:.7f}\tLR: {current_lr:.6f}")
+
+                    # --- validation ---
+                    if self.val_dataloader is not None and update_count % self.val_step == 0:
+                        self.validate_and_save()
                 else:
                     running_loss += loss.item() * batch[0].size(0)
-
-                # --- logging ---
-                if self.global_step % self.log_step == 0:
-                    avg_loss = running_loss / ((batch_idx + 1) * self.train_dataloader.batch_size)
-                    current_lr = self.optimizer.param_groups[0]['lr']
-                    tqdm.write(f"Step {self.global_step}\tTrain Loss: {avg_loss:.4f}\t"
-                            f"Grad Norm: {total_norm:.4f}\tLR: {current_lr:.6f}")
-
-                # --- validation ---
-                if self.val_dataloader is not None and self.global_step % self.val_step == 0:
-                    self.validate_and_save()
 
             # --- cuối epoch ---
             epoch_train_loss = running_loss / len(self.train_dataloader.dataset)
             if self.val_dataloader is not None:
                 epoch_val_loss = self.validate_and_save()
                 print(f"Epoch {epoch+1}/{num_epochs} finished, "
-                    f"Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_val_loss:.4f}")
+                    f"Train Loss: {epoch_train_loss:.7f}, Val Loss: {epoch_val_loss:.7f}")
             else:
-                print(f"Epoch {epoch+1}/{num_epochs} finished, Train Loss: {epoch_train_loss:.4f}")
+                print(f"Epoch {epoch+1}/{num_epochs} finished, Train Loss: {epoch_train_loss:.7f}")
 
             loop.close()
 
@@ -170,10 +170,10 @@ if __name__ == "__main__":
     model = HybridModel(
         num_labels=len(term_vocab), 
         vocab_size=len(protein_vocab), 
-        linear_input_dim=len(ox_vocab), 
         transformer_hidden=transformer_hidden,
         transformer_layers=transformer_layers,
         nhead=nhead,
+        linear_input_dim=len(ox_vocab), 
         linear_hidden_dim=linear_hidden_dim,
         classifier_hidden_dim=classifier_hidden_dim,
     )

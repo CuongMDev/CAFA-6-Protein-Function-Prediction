@@ -20,6 +20,7 @@ class MyScheduler(torch.optim.lr_scheduler.LRScheduler):
         self.scheduler_type = scheduler_type.lower()
         self.gamma = gamma
         self.warmup_steps = max(1, int(total_steps * warmup_ratio))
+        self.total_steps = total_steps
         self.final_lr_ratio = final_lr_ratio
         super().__init__(optimizer, last_epoch)
 

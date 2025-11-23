@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-class HybridTransformerModel(nn.Module):
+class HybridModel(nn.Module):
     def __init__(self, 
                  num_labels,
                  vocab_size=20,
@@ -16,7 +16,6 @@ class HybridTransformerModel(nn.Module):
         
         # --- Embedding for token sequences ---
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
-        
         # --- Transformer Encoder ---
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embedding_dim, 
