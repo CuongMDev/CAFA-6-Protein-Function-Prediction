@@ -234,7 +234,7 @@ def info_split(header):
     pe_match = re.search(r"PE=(\d+)", header)
     sv_match = re.search(r"SV=(\d+)", header)
 
-    ox = int(ox_match.group(1)) if pe_match else 0
+    ox = ox_match.group(1) if ox_match else "0"
     pe = int(pe_match.group(1)) if pe_match else 0
     sv = int(sv_match.group(1)) if sv_match else 0
 
@@ -301,7 +301,7 @@ def build_protein_amino_axit_matrix(fasta_file):
 
     return protein, amino_axit
 
-def build_protein_ox_aminoaxit_test(fasta_file):
+def build_ox_aminoaxit_test(fasta_file):
     amino_axit = []
     ox = []
 
@@ -376,13 +376,15 @@ def get_vocab():
     info = build_info_matrix(train_seq_file)
     info = info[:, 0]
     ox_vocab = list(set(info))
-
+    if "UNK" not in ox_vocab:
+        ox_vocab.append("UNK")
     return protein_vocab, amino_axit, terms_vocab, terms, info, ox_vocab
 
 def load_train():
     protein_vocab, amino_axit, terms_vocab, terms, info, ox_vocab = get_vocab()
 
-    ox, _ = one_hot(info, ox_vocab)
+    ox_str = [str(x) for x in info]
+    ox, _ = one_hot(ox_str, ox_vocab)
 
     df = pd.read_csv(terms_file, sep="\t")
 
@@ -393,33 +395,35 @@ def load_train():
 
     mask = build_mask(y, len(terms_vocab), graph)
 
-    return *x, y, mask, protein_vocab, terms_vocab, ox_vocab
+    return x[0], x[1], y, mask, protein_vocab, terms_vocab, ox_vocab
 
 def load_test():
     protein_vocab, _, terms_vocab, _, _, ox_vocab = get_vocab()
-    protein_vocab, ox, amino_axit = build_protein_ox_aminoaxit_test(test_seq_file)
+    ox, amino_axit = build_ox_aminoaxit_test(test_seq_file)
 
-    ox = one_hot(ox, ox_vocab)
+    ox_str = [str(x) for x in ox]
+
+    ox_onehot = one_hot(ox_str, ox_vocab)
 
     X = (
         protein_vocab,
         amino_axit,
-        ox
+        ox_onehot
     )
-    return *X, protein_vocab, terms_vocab, ox_vocab
+    return X[0], X[1], X[2], protein_vocab, terms_vocab, ox_vocab
 
 if __name__ == "__main__":
-    build_mask()
+    #build_mask()
 
     #load_data()
-    X, terms_name = load_test()
-    proteins, ox, amino_acids = X
-
+    # X, terms_name = load_test()
+    # proteins, ox, amino_acids = X
+    load_test()
     # In 5 protein đầu tiên
-    for i in range(min(5, len(proteins))):
-        print(f"Protein {i + 1}:")
-        print("ID:", proteins[i])
-        print("OX (one-hot):", ox[i])
-        print("Amino acids (first 30):", amino_acids[i][:30])
-        print("Total amino acids:", len(amino_acids[i]))
-        print("-" * 50)
+    # for i in range(min(5, len(proteins))):
+    #     print(f"Protein {i + 1}:")
+    #     print("ID:", proteins[i])
+    #     print("OX (one-hot):", ox[i])
+    #     print("Amino acids (first 30):", amino_acids[i][:30])
+    #     print("Total amino acids:", len(amino_acids[i]))
+    #     print("-" * 50)
