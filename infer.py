@@ -465,7 +465,7 @@ if __name__ == "__main__":
         model=model,
         entry_ids=entry_ids,
         term_vocab=term_vocab,
-        mask_graph=mask_graph,
+        mask_graph=graph,
         device=DEVICE,
         threshold=0.01,
         output_file="submission.tsv"
