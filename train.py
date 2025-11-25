@@ -4,13 +4,13 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, random_split
 from tqdm import tqdm 
 from config import DEVICE, GRADIENT_ACCUMULATION_STEPS, VAL_BATCH_SIZE, model_save_path, SCHEDULER_TYPE, GAMMA, WARMUP_RATIO, EPOCHS, \
-                    transformer_hidden, transformer_layers, nhead, linear_hidden_dim, classifier_hidden_dim, learning_rate, weight_decay, \
-                    BATCH_SIZE, VAL_RATIO, log_step, val_step
-from loss import ASL
+                    log_step, val_step, learning_rate, weight_decay, \
+                    BATCH_SIZE, VAL_RATIO, log_step, embedding_dim
+from loss import MaskedWeightedBCE
 from lr_schedule import MyScheduler
 from load_data import load_train
 import numpy as np
-from custom_dataset import CustomDataset, collate_fn
+from custom_dataset import CustomDataset
 
 class Trainer:
     def __init__(self, model, train_dataloader, val_dataloader=None,
@@ -42,16 +42,14 @@ class Trainer:
         print(f"Trainable parameters: {trainable_params:,}")
 
     def get_loss(self, batch):
-        seq_ids, features, mask, labels, attn_mask = batch
+        seq_ids, features, mask, labels = batch
         seq_ids = seq_ids.to(self.device)
         features = features.to(self.device)
         labels = labels.to(self.device)
         mask = mask.to(self.device)
-        attn_mask = attn_mask.to(self.device)
 
-        outputs = self.model(seq_ids, features, attn_mask=attn_mask)
-        loss = self.criterion(outputs, labels)
-        loss = (loss * mask).sum() / mask.sum()
+        outputs = self.model(seq_ids, features)
+        loss = self.criterion(outputs, labels, mask=mask)
         
         return loss
 
@@ -150,7 +148,7 @@ if __name__ == "__main__":
     from HybridModel import HybridModel
     import torch.optim as optim
 
-    seq_data, feature_data, labels, mask, protein_vocab, term_vocab, ox_vocab = load_train()
+    seq_data, feature_data, labels, mask, protein_vocab, term_vocab, ox_vocab, weights = load_train()
     print(f"num_labels: {len(term_vocab)}")
     print(f"vocab_size: {len(protein_vocab)}")
     print(f"linear_input_dim: {len(ox_vocab)}")
@@ -164,20 +162,15 @@ if __name__ == "__main__":
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
     # --- tạo dataloader ---
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=VAL_BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=VAL_BATCH_SIZE, shuffle=False)
 
     model = HybridModel(
-        num_labels=len(term_vocab), 
-        vocab_size=len(protein_vocab), 
-        transformer_hidden=transformer_hidden,
-        transformer_layers=transformer_layers,
-        nhead=nhead,
-        linear_input_dim=len(ox_vocab), 
-        linear_hidden_dim=linear_hidden_dim,
-        classifier_hidden_dim=classifier_hidden_dim,
+        output_dim=len(term_vocab), 
+        input_seq_dim=embedding_dim, 
+        input_feat_dim=len(ox_vocab)
     )
-    criterion=nn.BCEWithLogitsLoss(reduction='none')
+    criterion=MaskedWeightedBCE(weights=weights, reduction='mean', device=DEVICE)
     optimizer=optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     total_updates = (len(train_dataset) + GRADIENT_ACCUMULATION_STEPS - 1) // GRADIENT_ACCUMULATION_STEPS * EPOCHS  # ceil

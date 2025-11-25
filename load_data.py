@@ -1,4 +1,5 @@
 from collections import defaultdict
+import os
 import numpy as np
 import pandas as pd
 from config import *
@@ -8,16 +9,19 @@ import matplotlib.pyplot as plt
 from utils import one_hot
 
 
-def parse_obo(path):
+def parse_obo(path, weight_path=None):
     """
-        Đếm số lượng protein được annotate bởi mỗi term.
+    Đọc file OBO và (tùy chọn) gắn weight từ IA.tsv.
 
-        Args:
-            terms (list[dict]): danh sách term cần xét
+    Args:
+        path (str): path đến file OBO
+        weight_path (str, optional): path đến file IA.tsv
 
-        Returns:
-            list[int]: số protein tương ứng với mỗi term
-        """
+    Returns:
+        terms_name (list[str]): danh sách GO IDs
+        terms (list[dict]): danh sách dict của các term
+        weights (dict): {GO ID: weight} (chỉ các term weight > 0)
+    """
     terms = []
     terms_name = []
     term = None
@@ -47,8 +51,46 @@ def parse_obo(path):
                 else:
                     term[key] = value
 
-    return terms_name, terms
+    # --------------------------
+    # Đọc IA weights nếu có
+    # --------------------------
+    weights = {}
+    if weight_path is not None:
+        with open(weight_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                go_id, w = line.split("\t")
+                w = float(w)
+                if w > 0:  # chỉ giữ term weight > 0
+                    weights[go_id] = w
 
+        # Lọc các term có weight = 0
+        filtered_terms_name = [t for t in terms_name if t in weights]
+        filtered_terms = [t for t in terms if t["id"] in weights]
+        terms_name = filtered_terms_name
+        terms = filtered_terms
+
+    term_weights = [weights.get(t, 0.0) for t in terms_name]
+    return terms_name, terms, term_weights
+
+def get_emb_amino(emb_file):
+    """
+    Load embeddings đã lưu từ file .npy.
+
+    Args:
+        emb_file (str): đường dẫn file .npy chứa embeddings
+
+    Returns:
+        np.ndarray: embeddings (num_sequences, embedding_dim)
+    """
+    if not os.path.exists(emb_file):
+        raise FileNotFoundError(f"{emb_file} không tồn tại")
+    
+    embeds = np.load(emb_file)
+    print(f"Loaded embeddings of shape {embeds.shape} from {emb_file}")
+    return embeds
 
 def get_ids_numpy(terms):
     """
@@ -82,7 +124,10 @@ def get_terms_per_entryid_hot(df, terms_name):
     terms_per_entryid = [list(entryid_term_dict.get(eid, set())) for eid in entryids]
 
     term2idx = {x: i for i, x in enumerate(terms_name)}
-    terms_per_entryid_hot = [[term2idx[label] for label in sublist] for sublist in terms_per_entryid]
+    terms_per_entryid_hot = [
+        [term2idx[label] for label in sublist if label in term2idx]
+        for sublist in terms_per_entryid
+    ]
 
     return terms_per_entryid_hot, term2idx
 
@@ -128,6 +173,8 @@ def build_is_a_graph(terms, term2idx):
         if "is_a" in t:
             for x in t["is_a"]:
                 parent_id = x.split(" ! ")[0]
+                if parent_id not in term2idx:
+                    continue
                 graph[tid].append(term2idx[parent_id])
     return graph
 
@@ -258,81 +305,28 @@ def build_info_matrix(fasta_file):
 
     return np.array(data)
 
-
-def build_protein_amino_axit_matrix(fasta_file):
+def build_ox_test(fasta_file):
     """
-    Đọc file FASTA và trích chuỗi amino acid cho mỗi protein.
-
+    Đọc file FASTA và trả về danh sách OX (organism) theo thứ tự protein.
+    
+    Args:
+        fasta_file (str): đường dẫn file FASTA
+    
     Returns:
-        tuple: (amino_acids, proteins)
+        list: danh sách OX (str)
     """
-    amino_axit = []
-    protein = []
-    entry_id = None
-    seq_lines = []
-
-    with open(fasta_file, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:  # bỏ dòng rỗng
-                continue
-
-            if line.startswith(">"):
-                # Append protein trước đó
-                if seq_lines:
-                    seq_str = "".join(seq_lines)
-                    nums = [ord(c) - ord('A') + 1 for c in seq_str if 'A' <= c <= 'Z']
-                    protein.append(entry_id)
-                    amino_axit.append(nums)
-
-                # Lấy entry_id mới
-                parts = line.split("|")
-                entry_id = parts[1] if len(parts) > 1 else f"unknown_{len(protein)}"
-                seq_lines = []
-            else:
-                seq_lines.append(line.upper())  # chuẩn hóa chữ hoa
-
-        # Append protein cuối cùng
-        if seq_lines:
-            seq_str = "".join(seq_lines)
-            nums = [ord(c) - ord('A') + 1 for c in seq_str if 'A' <= c <= 'Z']
-            protein.append(entry_id)
-            amino_axit.append(nums)
-
-    return protein, amino_axit
-
-def build_ox_aminoaxit_test(fasta_file):
-    amino_axit = []
     ox = []
 
-    with open(fasta_file, 'r') as f:
-        lines = f.readlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-
-        # Kiểm tra dòng bắt đầu bằng '>' (header)
-        if line.startswith('>'):
-            # Tách protein ID và OX
-            parts = line[1:].split()  # Bỏ dấu '>' và tách
-            organism = parts[1] if len(parts) > 1 else ""
-
-            ox.append(organism)
-
-            # Đọc chuỗi amino acid (có thể nhiều dòng)
-            i += 1
-            sequence = ""
-            while i < len(lines) and not lines[i].startswith('>'):
-                sequence += lines[i].strip()
-                i += 1
-
-            # Chuyển đổi amino acid thành số (A=1, B=2, ..., Z=26)
-            amino_numbers = [ord(aa) - ord('A') + 1 for aa in sequence if aa.isalpha()]
-            amino_axit.append(amino_numbers)
-        else:
-            i += 1
-
-    return ox, amino_axit
+    with open(fasta_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('>'):
+                # Lấy organism từ dòng header
+                parts = line[1:].split()  # bỏ '>'
+                organism = parts[1] if len(parts) > 1 else ""
+                ox.append(organism)
+    
+    return ox
 
 def build_mask(y, n_terms, graph):
     """
@@ -369,37 +363,57 @@ def build_mask(y, n_terms, graph):
 
     return mask_fn
 
+def build_train_proteins(fasta_file):
+    """
+    Đọc file FASTA và trích tên protein (từ dòng header) theo đúng thứ tự.
+    
+    Returns:
+        list: danh sách tên protein (str)
+    """
+    proteins = []
+
+    with open(fasta_file, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                # Lấy tên protein, bỏ dấu '>' và khoảng trắng đầu/cuối
+                protein_name = line[1:].strip()
+                proteins.append(protein_name)
+    
+    return proteins
+
 def get_vocab():
-    protein_vocab, amino_axit = build_protein_amino_axit_matrix(train_seq_file)
-    terms_vocab, terms = parse_obo(obo_file)
+    protein_vocab = build_train_proteins(train_seq_file)
+    terms_vocab, terms, weights = parse_obo(obo_file, ia_file)
 
     info = build_info_matrix(train_seq_file)
     info = info[:, 0]
     ox_vocab = list(set(info))
-    if "UNK" not in ox_vocab:
-        ox_vocab.append("UNK")
-    return protein_vocab, amino_axit, terms_vocab, terms, info, ox_vocab
-
-def load_train():
-    protein_vocab, amino_axit, terms_vocab, terms, info, ox_vocab = get_vocab()
-
-    ox_str = [str(x) for x in info]
-    ox, _ = one_hot(ox_str, ox_vocab)
 
     df = pd.read_csv(terms_file, sep="\t")
+    y, term2idx = get_terms_per_entryid_hot(df, terms_vocab)
+    graph = build_is_a_graph(terms, term2idx)
+
+    return protein_vocab, terms_vocab, info, ox_vocab, graph, y, weights
+
+def load_train():
+    protein_vocab, terms_vocab, info, ox_vocab, graph, y, weights = get_vocab()
+    amino_axit = get_emb_amino(train_emb_npy)
+
+    ox, _ = one_hot(info, ox_vocab)
 
     x = (amino_axit, ox)
-    y, term2idx = get_terms_per_entryid_hot(df, terms_vocab)
-
-    graph = build_is_a_graph(terms, term2idx)
 
     mask = build_mask(y, len(terms_vocab), graph)
 
-    return x[0], x[1], y, mask, protein_vocab, terms_vocab, ox_vocab
+    return *x, y, mask, protein_vocab, terms_vocab, ox_vocab, weights
 
 def load_test():
-    protein_vocab, _, terms_vocab, _, _, ox_vocab = get_vocab()
-    ox, amino_axit = build_ox_aminoaxit_test(test_seq_file)
+    protein_vocab, _, terms_vocab, _, ox_vocab, graph, _, _ = get_vocab()
+    ox = build_ox_test(test_seq_file)
+    amino_axit = get_emb_amino(test_emb_npy)
 
     ox_str = [str(x) for x in ox]
 
@@ -410,7 +424,7 @@ def load_test():
         amino_axit,
         ox_onehot
     )
-    return X[0], X[1], X[2], protein_vocab, terms_vocab, ox_vocab
+    return *X, protein_vocab, terms_vocab, ox_vocab, graph
 
 if __name__ == "__main__":
     #build_mask()
