@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 from transformers import EsmModel, EsmTokenizer
-from config import esm_model_name, DEVICE, hf_cache, embedding_dim, train_emb_npy, train_seq_file, test_seq_file, test_emb_npy
+from config import esm_model_name, DEVICE, hf_cache, embedding_dim, train_emb_npy, train_seq_file, test_seq_unknown, test_emb_npy
 
 tokenizer = EsmTokenizer.from_pretrained(esm_model_name, cache_dir=hf_cache)
 model = EsmModel.from_pretrained(
@@ -125,4 +125,4 @@ def embed_fasta_to_npy(sequences, output_file, embedding_dim=1280):
 if __name__ == "__main__":
     # Đọc file FASTA, tạo embedding cho từng protein bằng get_embeddings, và lưu vào file .npy
     embed_fasta_to_npy(build_train_sequences(train_seq_file), train_emb_npy, embedding_dim=embedding_dim)
-    embed_fasta_to_npy(build_test_sequences(test_seq_file), test_emb_npy, embedding_dim=embedding_dim)
+    embed_fasta_to_npy(build_test_sequences(test_seq_unknown), test_emb_npy, embedding_dim=embedding_dim)

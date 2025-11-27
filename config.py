@@ -2,39 +2,47 @@ import torch
 
 data_dir = "Data/"
 model_dir = "Model/"
+test_dir = f"{data_dir}Test/"
 
 esm_model_name = "facebook/esm2_t33_650M_UR50D"
 
 train_seq_file = f"{data_dir}Train/train_sequences.fasta"
-test_seq_file = f"{data_dir}Test/testsuperset.fasta"
+test_seq_file = f"{test_dir}testsuperset.fasta"
 terms_file = f"{data_dir}Train/train_terms.tsv"
 taxonomy_file = f"{data_dir}Train/train_taxonomy.tsv"
 ia_file = f"{data_dir}IA.tsv"
 obo_file = f"{data_dir}Train/go-basic.obo"
+
+presubmit_file = f"{data_dir}archive/submission.tsv"
+
+test_seq_unknown = f"{test_dir}test_unknown.fasta"
+submit_known = f"{test_dir}submit_already_known.tsv"
 
 train_emb_npy = f"{data_dir}embeddings/train_emb.npy"
 test_emb_npy = f"{data_dir}embeddings/test_emb.npy"
 
 hf_cache = "./hf_cache"
 
+top_k = [3000, 1000, 500]
+top_k_type = ['P', 'F', 'C']
 
 model_save_path = f"{model_dir}/hybrid_model.pth"
 
 # model
 embedding_dim=1280
-learning_rate=0.001
+learning_rate=1e-3
 weight_decay=1e-4
 
 log_step=150
-val_step=500
+val_step=300
 
 SCHEDULER_TYPE="cosine"
 GAMMA=0.5
 WARMUP_RATIO=0.1
-EPOCHS = 5
+EPOCHS = 8
 
 BATCH_SIZE = 32
-VAL_BATCH_SIZE = 4
+VAL_BATCH_SIZE = 128
 GRADIENT_ACCUMULATION_STEPS = 1
 VAL_RATIO = 0.05
 
