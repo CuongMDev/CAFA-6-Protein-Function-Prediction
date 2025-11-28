@@ -8,34 +8,66 @@ from HybridModel import HybridModel
 import torch.nn as nn
 from load_data import load_test, info_split
 from custom_dataset import CustomDataset
-from config import VAL_BATCH_SIZE, test_seq_file, submit_known, embedding_dim, DEVICE
+from config import *
 
+def load_models(model_dir, k_folds, output_dim, input_seq_dim, input_feat_dim, device=DEVICE):
+    models = []
 
-def load_model(model_path, output_dim, input_seq_dim, input_feat_dim, device=DEVICE):
-    model = HybridModel(
-        output_dim=output_dim, 
-        input_seq_dim=input_seq_dim, 
-        input_feat_dim=input_feat_dim,
-    )
-    state_dict = torch.load(model_path, map_location=device)
-    model.load_state_dict(state_dict, strict=False)
-    model.to(device)
-    model.eval()
-    model = torch.jit.script(model)
-    return model
+    for fold in range(k_folds):
+        model_path = f"{model_dir}best_model_fold{fold}.pt"
+        model = HybridModel(
+            output_dim=output_dim,
+            input_seq_dim=input_seq_dim,
+            input_feat_dim=input_feat_dim
+        )
+        state = torch.load(model_path, map_location=device)
+        model.load_state_dict(state, strict=True)
+        model.to(device)
+        model.eval()
 
+        models.append(model)
 
-def infer(model, seq_ids, features, device=DEVICE):
+    return models
+
+def infer(models, seq_ids, features, device=DEVICE, ensemble="mean"):
+    """
+    Ensemble inference bằng nhiều fold models.
+
+    Args:
+        models  : list các model đã load weight từ từng fold
+        seq_ids : tensor [B, seq_dim]
+        features: tensor [B, feat_dim]
+        device  : CUDA/CPU
+        ensemble: "mean" hoặc "max"
+
+    Returns:
+        probs: tensor [B, C] sau sigmoid (ensemble)
+    """
     seq_ids = seq_ids.to(device)
     features = features.to(device)
 
-    with torch.no_grad():
-        outputs = model(seq_ids, features)
+    all_outputs = []
 
-    outputs = torch.sigmoid(outputs)
+    for model in models:
+        model.eval()
+        model.to(device)
 
-    # Đưa output về CPU để giải phóng GPU
-    return outputs.cpu()
+        with torch.no_grad():
+            logits = model(seq_ids, features)  # [B, C]
+            probs = torch.sigmoid(logits)      # sigmoid tại đây
+            all_outputs.append(probs.cpu())    # đưa về CPU giải phóng VRAM
+
+    # Stack outputs: [K, B, C]
+    all_outputs = torch.stack(all_outputs, dim=0)
+
+    if ensemble == "mean":
+        final_outputs = all_outputs.mean(dim=0)
+    elif ensemble == "max":
+        final_outputs = all_outputs.max(dim=0).values
+    else:
+        raise ValueError("ensemble must be 'mean' or 'max'")
+
+    return final_outputs
 
 
 def extract_entry_ids(fasta_file):
@@ -85,28 +117,51 @@ def compute_topo_order(child_to_parents, parent_to_children):
                 queue.append(child)
     return order
 
-def conditional_to_raw_batch(probs_cond_batch, child_to_parents, topo_order=None, prior_mean=0.02):
+def conditional_to_raw_batch(probs_cond_batch, child_to_parents_masked, child_to_parents_full,
+                             parent_to_children_full, topo_order_masked, topo_order_full):
     """
-    Phiên bản xử lý batch, probs_cond_batch: (batch_size, n_terms)
-    """
-    probs_raw_batch = np.zeros_like(probs_cond_batch, dtype=float)
+    Phiên bản xử lý batch, trả về xác suất cho toàn bộ DAG.
 
-    for term in topo_order:
-        parents = child_to_parents[term]
+    Args:
+        probs_cond_batch: (batch_size, NUM_CLASSES), xác suất model output
+        child_to_parents_masked: DAG chỉ gồm node < NUM_CLASSES
+        topo_order_masked: topo order chỉ node < NUM_CLASSES
+        child_to_parents_full: DAG đầy đủ
+        parent_to_children_full: DAG đầy đủ
+        NUM_CLASSES: số class model output
+        prior_mean: giá trị gán cho các node chưa có xác suất
+    Returns:
+        probs_full: (batch_size, n_terms), xác suất toàn DAG
+    """
+    batch_size = probs_cond_batch.shape[0]
+    n_terms = len(child_to_parents_full)
+    probs_full = np.zeros((batch_size, n_terms), dtype=float)
+
+    # --- 1) Tính xác suất cho NUM_CLASSES đầu theo topo_masked ---
+    for term in topo_order_masked:
+        parents = child_to_parents_masked[term]
         if len(parents) == 0:
-            probs_raw_batch[:, term] = probs_cond_batch[:, term]
+            probs_full[:, term] = probs_cond_batch[:, term]
         else:
-            parent_probs = probs_raw_batch[:, parents]  # shape: (batch_size, n_parents)
+            parent_probs = probs_full[:, parents]
             p_parent_exist = 1 - np.prod(1 - parent_probs, axis=1)
-            probs_raw_batch[:, term] = probs_cond_batch[:, term] * p_parent_exist
+            probs_full[:, term] = probs_cond_batch[:, term] * p_parent_exist
 
-    # Các node chưa có parent nào (nếu DAG disconnected)
-    # Không cần dùng processed, topo_order đảm bảo đã tính hết các node có parent
-    # Các node isolated có topo_order ở đầu hoặc cuối, probs_raw sẽ = probs_cond hoặc prior_mean
-    return probs_raw_batch
+    # --- 2) Propagate sang toàn bộ DAG theo topo full ---
+    for term in topo_order_full[::-1]:  # đảo ngược topo
+        if term < NUM_CLASSES:
+            continue
+        children = parent_to_children_full[term]
+        if children:
+            child_probs = probs_full[:, children]
+            max_child = np.max(child_probs, axis=1)
+            # Nếu term chưa có xác suất, gán max_child
+            probs_full[:, term] = np.maximum(probs_full[:, term], max_child)
 
-def create_submission(dataloader, model, entry_ids, term_vocab,
-                            parent_to_children,
+    return probs_full
+
+def create_submission(dataloader, model, entry_ids, term_vocab, known_protein_to_terms_dict,
+                            parent_to_children, parent_to_children_masked,
                             device, threshold=0.0, buffer_size=1000,
                             output_file="submission.tsv"):
     """
@@ -121,10 +176,12 @@ def create_submission(dataloader, model, entry_ids, term_vocab,
     buffer_probs = []
     buffer_ids = []
 
-    child_to_parents = build_graph_structures(parent_to_children)
+    child_to_parents_masked  = build_graph_structures(parent_to_children_masked)
+    child_to_parent = build_graph_structures(parent_to_children)
 
     # --- Tính topo order một lần cho DAG ---
-    topo_order = compute_topo_order(child_to_parents, parent_to_children)
+    topo_order_masked = compute_topo_order(child_to_parents_masked, parent_to_children_masked)
+    topo_order_full = compute_topo_order(child_to_parent, parent_to_children)
 
     with open(output_file, "w", encoding="utf-8") as f:
         for batch in tqdm(dataloader, desc="Inference", total=len(dataloader)):
@@ -142,7 +199,7 @@ def create_submission(dataloader, model, entry_ids, term_vocab,
                     break
                 protein_id = entry_ids[idx]
                 buffer_probs.append(outputs[j])
-                buffer_ids.append(protein_id)
+                buffer_ids.append(idx)
                 idx += 1
 
                 # Khi buffer đầy
@@ -151,13 +208,13 @@ def create_submission(dataloader, model, entry_ids, term_vocab,
 
                     # --- Tính conditional_to_raw batch ---
                     consistent_probs_batch = conditional_to_raw_batch(
-                        buffer_probs_np, child_to_parents, topo_order=topo_order
+                        buffer_probs_np, child_to_parents_masked, child_to_parent, parent_to_children, topo_order_masked=topo_order_masked, topo_order_full=topo_order_full
                     )
 
                     # --- Ghi ra file ---
-                    for protein_id, consistent_probs, probs_orig in zip(
+                    for protein_idx, consistent_probs, probs_orig in zip(
                             buffer_ids, consistent_probs_batch, buffer_probs_np):
-                        total_consistency_boost += np.mean(np.abs(consistent_probs - probs_orig))
+                        total_consistency_boost += np.mean(np.abs(consistent_probs[:NUM_CLASSES] - probs_orig))
                         # Lấy top_k nếu top_k không None, còn không duyệt tất cả
                         top_indices = range(len(consistent_probs))
                         total_expanded += len(top_indices)
@@ -168,8 +225,11 @@ def create_submission(dataloader, model, entry_ids, term_vocab,
                             if consistent_probs[t] < threshold:
                                 continue
                             term_id = term_vocab[t]
+                            if protein_idx in known_protein_to_terms_dict and \
+                                term_id in known_protein_to_terms_dict[protein_idx]:
+                                continue
                             prob = consistent_probs[t]
-                            write_buffer.append(f"{protein_id}\t{term_id}\t{prob:.6f}\n")
+                            write_buffer.append(f"{entry_ids[protein_idx]}\t{term_id}\t{prob:.6f}\n")
                             total_lines += 1
 
                     # Ghi buffer ra file và reset
@@ -182,11 +242,11 @@ def create_submission(dataloader, model, entry_ids, term_vocab,
         if buffer_probs:
             buffer_probs_np = np.array(buffer_probs)
             consistent_probs_batch = conditional_to_raw_batch(
-                buffer_probs_np, child_to_parents, topo_order=topo_order
+                buffer_probs_np, child_to_parents_masked, child_to_parent, parent_to_children, topo_order_masked=topo_order_masked, topo_order_full=topo_order_full
             )
 
             for protein_id, consistent_probs, probs_orig in zip(buffer_ids, consistent_probs_batch, buffer_probs_np):
-                total_consistency_boost += np.mean(np.abs(consistent_probs - probs_orig))
+                total_consistency_boost += np.mean(np.abs(consistent_probs[:NUM_CLASSES] - probs_orig))
                 top_indices = range(len(consistent_probs))
                 total_expanded += len(top_indices)
                 for t in top_indices:
@@ -222,7 +282,7 @@ if __name__ == "__main__":
     print(f"{'=' * 60}\n")
 
     # Load test data
-    test_protein_vocab, amino_axit, ox_features, train_protein_vocab, term_vocab, ox_vocab, graph = load_test()
+    test_protein_vocab, amino_axit, ox_features, train_protein_vocab, term_vocab, ox_vocab, graph, graph_masked, protein_to_terms_dict = load_test()
 
     print(f"🔍 Debug - ox_features type: {type(ox_features)}")
     print(f"🔍 Debug - ox_features shape: {ox_features.shape if hasattr(ox_features, 'shape') else len(ox_features)}")
@@ -238,9 +298,10 @@ if __name__ == "__main__":
     dataloader = DataLoader(dataset, batch_size=VAL_BATCH_SIZE, shuffle=False)
 
     # Khởi tạo model với vocab từ TRAIN (vì model được train với vocab này)
-    model = load_model(
-        model_path=model_save_path,
-        output_dim=len(term_vocab), 
+    model = load_models(
+        model_dir=model_dir,
+        k_folds=k_folds,
+        output_dim=top_k, 
         input_seq_dim=embedding_dim, 
         input_feat_dim=len(ox_vocab),
         device=DEVICE
@@ -263,7 +324,9 @@ if __name__ == "__main__":
         entry_ids=entry_ids,
         term_vocab=term_vocab,
         parent_to_children=graph,  # Dùng graph structure đúng
+        parent_to_children_masked=graph_masked,
         device=DEVICE,
+        known_protein_to_terms_dict=protein_to_terms_dict,
         # top_k=2000,
         threshold=0.01,  # ✅ Tăng threshold để giảm kích thước file (0.3-0.5 là hợp lý)
         output_file=submission_file

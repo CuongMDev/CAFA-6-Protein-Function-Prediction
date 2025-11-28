@@ -1,12 +1,11 @@
 from sklearn.metrics import average_precision_score
+from sklearn.model_selection import KFold
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, random_split
 from tqdm import tqdm 
-from config import DEVICE, GRADIENT_ACCUMULATION_STEPS, VAL_BATCH_SIZE, model_save_path, SCHEDULER_TYPE, GAMMA, WARMUP_RATIO, EPOCHS, \
-                    log_step, val_step, learning_rate, weight_decay, \
-                    BATCH_SIZE, VAL_RATIO, log_step, embedding_dim, top_k
-from loss import MaskedWeightedBCE
+from config import *
+from loss import *
 from lr_schedule import MyScheduler
 from load_data import load_train
 import numpy as np
@@ -224,48 +223,58 @@ if __name__ == "__main__":
     print(f"vocab_size: {len(protein_vocab)}")
     print(f"linear_input_dim: {len(ox_vocab)}")
     
-    dataset = CustomDataset(seq_data, feature_data, labels, mask, num_labels=len(term_vocab))
+    dataset = CustomDataset(seq_data, feature_data, labels, mask, num_labels=NUM_CLASSES)
 
-    # --- chia dataset ---
-    train_size = int(len(dataset) * (1 - VAL_RATIO))
-    val_size = len(dataset) - train_size
+    # --- K-Fold setup ---
+    kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
 
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42))
+    fold_models = []
+    for fold, (train_idx, val_idx) in enumerate(kf.split(dataset)):
+        print(f"\n=== Fold {fold+1}/{k_folds} ===")
 
-    # --- tạo dataloader ---
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=VAL_BATCH_SIZE, shuffle=False)
+        # --- Tạo subset cho fold ---
+        train_subset = torch.utils.data.Subset(dataset, train_idx)
+        val_subset = torch.utils.data.Subset(dataset, val_idx)
 
-    model = HybridModel(
-        output_dim=len(term_vocab), 
-        input_seq_dim=embedding_dim, 
-        input_feat_dim=len(ox_vocab)
-    )
-    criterion=MaskedWeightedBCE(weights=weights, reduction='mean', device=DEVICE)
-    optimizer=SophiaG(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        train_loader = DataLoader(train_subset, batch_size=BATCH_SIZE, shuffle=True)
+        val_loader = DataLoader(val_subset, batch_size=VAL_BATCH_SIZE, shuffle=False)
 
-    total_updates = (len(train_loader) + GRADIENT_ACCUMULATION_STEPS - 1) // GRADIENT_ACCUMULATION_STEPS * EPOCHS  # ceil
-    scheduler = MyScheduler(
-        optimizer, 
-        total_steps=total_updates,
-        scheduler_type=SCHEDULER_TYPE, 
-        warmup_ratio=WARMUP_RATIO,             # ví dụ 10% tổng step là warm-up
-        gamma=GAMMA
-    )
-    trainer = Trainer(
-        model,
-        train_dataloader=train_loader,
-        val_dataloader=val_loader,
-        criterion=criterion,  # multi-label,   
-        optimizer=optimizer,
-        scheduler=scheduler,
-        device=DEVICE,
-        log_step=log_step,
-        val_step=val_step,
-        model_save_path=model_save_path,
-        mask=mask,
-        top_k=top_k,
-        weights=weights
-    )
+        # --- Tạo model mới cho fold ---
+        model = HybridModel(
+            output_dim=top_k,
+            input_seq_dim=embedding_dim,
+            input_feat_dim=len(ox_vocab)
+        )
 
-    trained_model = trainer.train(num_epochs=EPOCHS, accumulate_steps=GRADIENT_ACCUMULATION_STEPS)
+        criterion = MaskedWeightedBCE(weights=weights, reduction='mean', device=DEVICE)
+        optimizer = SophiaG(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+        total_updates = (len(train_loader) + GRADIENT_ACCUMULATION_STEPS - 1) // GRADIENT_ACCUMULATION_STEPS * EPOCHS
+        scheduler = MyScheduler(
+            optimizer, 
+            total_steps=total_updates,
+            scheduler_type=SCHEDULER_TYPE, 
+            warmup_ratio=WARMUP_RATIO,
+            gamma=GAMMA
+        )
+
+        trainer = Trainer(
+            model,
+            train_dataloader=train_loader,
+            val_dataloader=val_loader,
+            criterion=criterion,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            device=DEVICE,
+            log_step=log_step,
+            val_step=val_step,
+            model_save_path=f"{model_dir}best_model_fold{fold}.pt",  # lưu model riêng cho từng fold
+            mask=mask,
+            top_k=top_k,
+            weights=weights
+        )
+
+        trained_model = trainer.train(num_epochs=EPOCHS, accumulate_steps=GRADIENT_ACCUMULATION_STEPS)
+        fold_models.append(trained_model)
+
+    print("\n=== K-Fold training done ===")

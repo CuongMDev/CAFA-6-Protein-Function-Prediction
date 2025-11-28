@@ -3,16 +3,23 @@ import re
 import numpy as np
 import torch
 from tqdm import tqdm
-from transformers import EsmModel, EsmTokenizer
-from config import esm_model_name, DEVICE, hf_cache, embedding_dim, train_emb_npy, train_seq_file, test_seq_unknown, test_emb_npy
+from transformers import EsmModel, EsmTokenizer, T5EncoderModel, T5Tokenizer
+from config import esm_model_name, t5_model_name, DEVICE, hf_cache, embedding_dim, train_emb_npy, train_seq_file, test_seq_unknown, test_emb_npy
 
-tokenizer = EsmTokenizer.from_pretrained(esm_model_name, cache_dir=hf_cache)
-model = EsmModel.from_pretrained(
-    esm_model_name, 
-    add_cross_attention=False,
-    is_decoder=False, 
-    cache_dir=hf_cache
-).to(DEVICE)
+# tokenizer = EsmTokenizer.from_pretrained(esm_model_name, cache_dir=hf_cache)
+# model = EsmModel.from_pretrained(
+#     esm_model_name, 
+#     add_cross_attention=False,
+#     is_decoder=False, 
+#     cache_dir=hf_cache
+# ).to(DEVICE)
+
+tokenizer = T5Tokenizer.from_pretrained(t5_model_name, do_lower_case=False, cache_dir=hf_cache)
+model = T5EncoderModel.from_pretrained(t5_model_name, cache_dir=hf_cache, use_safetensors=True).to(DEVICE)
+
+# print sum model parameter, %6
+total_params = sum(p.numel() for p in model.parameters())
+print(f"{total_params:,}")
 
 model.eval()
 
@@ -110,7 +117,7 @@ def embed_fasta_to_npy(sequences, output_file, embedding_dim=1280):
 
     pbar = tqdm(total=num_sequences, desc="Embedding sequences", ncols=100)
     for i, seq in enumerate(sequences):
-        embeds[i] = get_embeddings(seq).detach().cpu().numpy()
+        embeds[i] = get_embeddings(seq).cpu().numpy()
         torch.cuda.empty_cache()
         
         # Update tqdm mỗi `batch_size` bước hoặc khi đến cuối
@@ -124,5 +131,8 @@ def embed_fasta_to_npy(sequences, output_file, embedding_dim=1280):
 
 if __name__ == "__main__":
     # Đọc file FASTA, tạo embedding cho từng protein bằng get_embeddings, và lưu vào file .npy
-    embed_fasta_to_npy(build_train_sequences(train_seq_file), train_emb_npy, embedding_dim=embedding_dim)
-    embed_fasta_to_npy(build_test_sequences(test_seq_unknown), test_emb_npy, embedding_dim=embedding_dim)
+    # embed_fasta_to_npy(build_train_sequences(train_seq_file), train_emb_npy, embedding_dim=1280)
+    # embed_fasta_to_npy(build_test_sequences(test_seq_unknown), test_emb_npy, embedding_dim=1280)
+
+    embed_fasta_to_npy(build_train_sequences(train_seq_file), train_emb_npy, embedding_dim=1024)
+    embed_fasta_to_npy(build_test_sequences(test_emb_npy), test_emb_npy, embedding_dim=1024)
