@@ -20,8 +20,11 @@ presubmit_file = f"{data_dir}archive/submission.tsv"
 
 submit_known = f"{test_dir}submit_already_known.tsv"
 
-train_emb_npy = f"{data_dir}embeddings/train_emb.npy"
-test_emb_npy = f"{data_dir}embeddings/test_emb.npy"
+esm_train_emb_npy = f"{data_dir}embeddings/esm_train_emb.npy"
+esm_test_emb_npy = f"{data_dir}embeddings/esm_test_emb.npy"
+
+t5_train_emb_npy = f"{data_dir}embeddings/t5_train_emb.npy"
+t5_test_emb_npy = f"{data_dir}embeddings/t5_test_emb.npy"
 
 hf_cache = "./hf_cache"
 
@@ -32,7 +35,7 @@ NUM_CLASSES = sum(top_k)
 model_save_path = f"{model_dir}/hybrid_model.pth"
 
 # model
-embedding_dim=1280
+embedding_dim = 1280 + 1024
 learning_rate=1e-3
 weight_decay=1e-1
 

@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 from transformers import EsmModel, EsmTokenizer, T5EncoderModel, T5Tokenizer
-from config import esm_model_name, t5_model_name, DEVICE, hf_cache, embedding_dim, train_emb_npy, train_seq_file, test_seq_unknown, test_emb_npy
+from config import esm_model_name, t5_model_name, DEVICE, hf_cache, embedding_dim, train_emb_npy, train_seq_file, test_emb_npy
 
 # tokenizer = EsmTokenizer.from_pretrained(esm_model_name, cache_dir=hf_cache)
 # model = EsmModel.from_pretrained(

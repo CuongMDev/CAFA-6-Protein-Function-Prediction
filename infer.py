@@ -88,16 +88,21 @@ def extract_entry_ids(fasta_file):
 # ----------------------------
 def build_graph_structures(child_to_parents):
     """
-    Xây dựng child->parents chỉ dùng list
+    Từ danh sách child->parents, xây dựng parent->children.
+    
+    Args:
+        child_to_parents: list[list[int]], index là child, value là list parent
+    Returns:
+        parent_to_children: list[list[int]], index là parent, value là list child
     """
-    parent_to_children = [[] for _ in range(len(child_to_parents))]
+    n = len(child_to_parents)
+    parent_to_children = [[] for _ in range(n)]
 
-    # lấp dữ liệu
     for child, parents in enumerate(child_to_parents):
         for p in parents:
             parent_to_children[p].append(child)
 
-    return child_to_parents
+    return parent_to_children
 
 def compute_topo_order(child_to_parents, parent_to_children):
     """
@@ -161,7 +166,7 @@ def conditional_to_raw_batch(probs_cond_batch, child_to_parents_masked, child_to
     return probs_full
 
 def create_submission(dataloader, model, entry_ids, term_vocab, known_protein_to_terms_dict,
-                            parent_to_children, parent_to_children_masked,
+                            child_to_parent, child_to_parents_masked,
                             device, threshold=0.0, buffer_size=1000,
                             output_file="submission.tsv"):
     """
@@ -176,8 +181,8 @@ def create_submission(dataloader, model, entry_ids, term_vocab, known_protein_to
     buffer_probs = []
     buffer_ids = []
 
-    child_to_parents_masked  = build_graph_structures(parent_to_children_masked)
-    child_to_parent = build_graph_structures(parent_to_children)
+    parent_to_children_masked = build_graph_structures(child_to_parents_masked)
+    parent_to_children = build_graph_structures(child_to_parent)
 
     # --- Tính topo order một lần cho DAG ---
     topo_order_masked = compute_topo_order(child_to_parents_masked, parent_to_children_masked)
@@ -191,6 +196,7 @@ def create_submission(dataloader, model, entry_ids, term_vocab, known_protein_to
             # model output
             outputs = infer(model, seq_ids, features)  # tensor
             outputs = outputs.cpu().numpy()  # (batch_size, n_terms)
+
             batch_size = outputs.shape[0]
 
             # Lưu vào buffer
@@ -323,8 +329,8 @@ if __name__ == "__main__":
         model=model,
         entry_ids=entry_ids,
         term_vocab=term_vocab,
-        parent_to_children=graph,  # Dùng graph structure đúng
-        parent_to_children_masked=graph_masked,
+        child_to_parent=graph,  # Dùng graph structure đúng
+        child_to_parents_masked=graph_masked,
         device=DEVICE,
         known_protein_to_terms_dict=protein_to_terms_dict,
         # top_k=2000,

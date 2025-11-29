@@ -97,76 +97,88 @@ def get_ids_numpy(terms):
        """
     return np.array([t["id"] for t in terms])
 
-def get_terms_per_entryid(df, terms_name, weight, top_k, top_k_type):
+def get_terms_per_entryid(protein_vocab, df, terms_name, weight, top_k, top_k_type):
     """
-    Lấy các term cho mỗi EntryID dạng hot-index, đưa top_k theo aspect lên đầu nhưng không bỏ các term còn lại.
-    
-    Args:
-        df: DataFrame chứa cột ['EntryID', 'term', 'aspect']
-        terms_name: list tất cả term theo thứ tự chuẩn
-        weight: dict {term: weight}
-        top_k: [k1, k2, k3], số lượng nhãn cần đưa lên đầu theo aspect
-        top_k_type: ['C','F','P'] hoặc thứ tự nào khác, cùng chiều với top_k
-
-    Returns:
-        terms_per_entryid_hot: list[list[int]] của mỗi entry, các term đã chuyển sang index
-        term2idx: dict term -> index
-        term_weights_list: list weight theo thứ tự filtered_terms_list
-        filtered_terms_list: list các term với top-k lên đầu
+    Tạo danh sách term-index cho mỗi protein trong protein_vocab.
+    Top-k theo aspect được đưa lên đầu.
     """
     if len(top_k) != 3 or len(top_k_type) != 3:
         raise ValueError("top_k và top_k_type phải có độ dài 3")
 
     k1, k2, k3 = top_k
-    entryids = df["EntryID"].unique()
 
-    # Chỉ giữ các term có weight > 0
-    valid_terms = [t for t in terms_name if weight.get(t, 0.0) > 0]
-
-    # Gom term theo tần suất
+    # -----------------------------
+    # 2) Tần suất & aspect
+    # -----------------------------
     term_counter = Counter(df["term"].values)
     aspect_dict = dict(zip(df["term"], df["aspect"]))
 
-    # Lấy top-k theo aspect
-    top_terms = {top_k_type[0]: [], top_k_type[1]: [], top_k_type[2]: []}
+    # -----------------------------
+    # 3) Lấy top-k theo aspect
+    # -----------------------------
+    top_terms = {a: [] for a in top_k_type}
     k_dict = {top_k_type[0]: k1, top_k_type[1]: k2, top_k_type[2]: k3}
 
     for term, _ in term_counter.most_common():
-        if term not in valid_terms:
+        if term not in terms_name:
             continue
         asp = aspect_dict.get(term, None)
         if asp in top_terms and len(top_terms[asp]) < k_dict[asp]:
             top_terms[asp].append(term)
 
-    # 1) Tạo filtered_terms_list: top-k lên đầu, phần còn lại theo terms_name ban đầu
+    # -----------------------------
+    # 4) Tạo filtered_terms_list
+    # -----------------------------
     topk_ordered = []
     for a in top_k_type:
         topk_ordered.extend(top_terms[a])
 
-    # Phần còn lại giữ nguyên thứ tự
-    remaining_terms = [t for t in valid_terms if t not in topk_ordered]
+    remaining_terms = [t for t in terms_name if t not in topk_ordered]
     filtered_terms_list = topk_ordered + remaining_terms
 
-    most_common_terms = set(filtered_terms_list)  # tất cả valid terms bây giờ
+    # Aspect list theo filtered_terms_list
+    filtered_aspects_list = [aspect_dict.get(t, None) for t in filtered_terms_list]
 
-    # Map EntryID -> list term (chỉ giữ term có weight > 0)
+    most_common_terms = set(filtered_terms_list)
+
+    # -----------------------------
+    # 5) Map EntryID → set(term)
+    # -----------------------------
     entryid_term_dict = {}
     for eid, term in df[["EntryID", "term"]].values:
         if term in most_common_terms:
             entryid_term_dict.setdefault(eid, set()).add(term)
 
-    terms_per_entryid = [list(entryid_term_dict.get(eid, set())) for eid in entryids]
-
-    # Chuyển sang index
+    # -----------------------------
+    # 6) Map sang index theo protein_vocab
+    # -----------------------------
     term2idx = {t: i for i, t in enumerate(filtered_terms_list)}
-    terms_per_entryid = [
-        [term2idx[label] for label in sublist if label in term2idx and term2idx[label] < NUM_CLASSES]
-        for sublist in terms_per_entryid
-    ]
 
+    terms_per_entryid = []
+    for protein in protein_vocab:
+        # Lấy đúng terms của protein, nếu không có → []
+        terms = entryid_term_dict.get(protein, set())
+        idx_list = [
+            term2idx[t] for t in terms 
+            if t in term2idx and term2idx[t] < NUM_CLASSES
+        ]
+        terms_per_entryid.append(idx_list)
+
+
+    # -----------------------------
+    # 7) Weight list theo thứ tự filtered_terms_list
+    # -----------------------------
     term_weights_list = [weight[t] for t in filtered_terms_list]
 
-    return terms_per_entryid, term2idx, term_weights_list, filtered_terms_list
+    return (
+        terms_per_entryid,        # theo đúng protein_vocab
+        term2idx,
+        term_weights_list,
+        filtered_terms_list,
+        filtered_aspects_list
+    )
+
+
 def term_protein_counts(df, terms):
     """
     Trả về số lượng protein mà mỗi term xuất hiện.
@@ -253,89 +265,6 @@ def build_is_a_graph(terms, term2idx, terms_per_entryid_hot):
 
     return graph_full, graph_masked, labels_propagated
 
-def is_ancestor(graph, ancestor, descendant, visited=None):
-    """
-    Kiểm tra xem 'ancestor' có phải là cha (hoặc ông, cụ...) của 'descendant' không
-    theo đồ thị is_a.
-
-    Args:
-        graph (dict): dict term_id -> list parent_ids
-        ancestor (str): term_id của ancestor
-        descendant (str): term_id của descendant
-        visited (set): tập các node đã thăm, dùng để tránh vòng lặp
-
-    Returns:
-        bool: True nếu ancestor là cha của descendant
-    """
-    if visited is None:
-        visited = set()
-
-    if descendant not in graph:
-        return False
-
-    # Tránh vòng lặp
-    if descendant in visited:
-        return False
-    visited.add(descendant)
-
-    parents = graph[descendant]
-    if ancestor in parents:
-        return True
-
-    # Đệ quy kiểm tra các parent
-    for p in parents:
-        if is_ancestor(graph, ancestor, p, visited):
-            return True
-
-    return False
-
-
-def build_vocab(terms, get_ancestors):
-    """
-       Xây dựng vocab chứa toàn bộ terms và ancestors của chúng.
-
-       Returns:
-           vocab: list term_id
-           vocab_index: dict: term_id -> index
-       """
-    vocab = set()
-    for t in terms:
-        tid = t["id"]
-        vocab.add(tid)
-        vocab |= get_ancestors(tid)
-    vocab = sorted(list(vocab))
-    vocab_index = {v: i for i, v in enumerate(vocab)}
-    return vocab, vocab_index
-
-
-def build_term_embedding(term_id, vocab_index, get_ancestors):
-    """
-     Một vector nhị phân: term + ancestors được đánh dấu bằng 1.
-
-     Returns:
-         numpy array
-     """
-    vec = np.zeros(len(vocab_index), dtype=float)
-    vec[vocab_index[term_id]] = 1.0
-    for anc in get_ancestors(term_id):
-        vec[vocab_index[anc]] = 1.0
-    return vec
-
-
-def build_embedding_matrix(terms, vocab_index, get_ancestors):
-    """
-       Tạo embedding matrix cho toàn bộ terms.
-
-       Returns:
-           numpy.ndarray shape (num_terms × vocab_size)
-       """
-    matrix = []
-    for t in terms:
-        emb = build_term_embedding(t["id"], vocab_index, get_ancestors)
-        matrix.append(emb)
-    return np.array(matrix)
-
-
 def info_split(header):
     """
        Parse header FASTA và lấy EntryID, PE, SV.
@@ -362,7 +291,7 @@ def info_split(header):
     return entry_id, ox, pe, sv
 
 
-def build_info_matrix(fasta_file):
+def build_train_proteins(fasta_file):
     """
         Đọc file FASTA và lấy EntryID, PE, SV cho mỗi protein.
 
@@ -370,14 +299,16 @@ def build_info_matrix(fasta_file):
             DataFrame: ["EntryID", "PE", "SV"]
         """
     data = []
+    protein = []
     with open(fasta_file, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line.startswith(">"):
                 entry_id, ox, pe, sv = info_split(line)
                 data.append((ox, pe, sv))
+                protein.append(entry_id)
 
-    return np.array(data)
+    return protein, np.array(data)
 
 def build_ox_test(fasta_file):
     """
@@ -437,7 +368,7 @@ def build_mask(y, n_terms, graph):
 
     return mask_fn
 
-def build_proteins(fasta_file, protein_path, split_character):
+def build_test_proteins(fasta_file):
     """
     Đọc file FASTA và trích tên protein (từ dòng header) theo đúng thứ tự.
     
@@ -454,7 +385,7 @@ def build_proteins(fasta_file, protein_path, split_character):
             if line.startswith(">"):
                 # Lấy tên protein, bỏ dấu '>' và khoảng trắng đầu/cuối
                 line = line[1:]
-                protein_name = line.split(split_character)[protein_path]
+                protein_name = line.split(' ')[0]
 
                 proteins.append(protein_name)
     
@@ -502,36 +433,75 @@ def read_submission_tsv(file, protein_vocab, terms_vocab):
     return protein_to_terms_dict
 
 def get_vocab():
-    protein_vocab = build_proteins(train_seq_file, protein_path=1, split_character='|')
+    protein_vocab, info = build_train_proteins(train_seq_file)
+    info = info[:, 0]
     terms_vocab, terms, weights2idx = parse_obo(obo_file, ia_file)
 
-    info = build_info_matrix(train_seq_file)
-    info = info[:, 0]
     ox_vocab = list(set(info))
 
     df = pd.read_csv(terms_file, sep="\t")
-    terms_per_entryid, term2idx, weights, terms_vocab = get_terms_per_entryid(df, terms_vocab, weights2idx, top_k=top_k, top_k_type=top_k_type)
+    terms_per_entryid, term2idx, weights, terms_vocab, aspects_list = get_terms_per_entryid(protein_vocab, df, terms_vocab, weights2idx, top_k=top_k, top_k_type=top_k_type)
     graph, graph_masked, y = build_is_a_graph(terms, term2idx, terms_per_entryid)
 
-    return protein_vocab, terms_vocab, info, ox_vocab, graph, graph_masked, y, weights
+    return protein_vocab, terms_vocab, info, ox_vocab, graph, graph_masked, y, weights, aspects_list
+
+def filter_train(terms_per_entryid, aspects_list, required_aspects, min_match=2):
+    """
+    Lọc những entry mà có ít nhất `min_match` aspect trong required_aspects.
+
+    Args:
+        terms_per_entryid: list[list[int]]
+            Danh sách nhãn dạng index theo filtered_terms_list.
+        aspects_list: list[str]
+            filtered_aspects_list, cùng thứ tự terms_vocab.
+        required_aspects: set hoặc list
+            Ví dụ: {'C','F','P'}
+        min_match: int
+            Số aspect tối thiểu phải có trong entry (mặc định 2)
+
+    Returns:
+        filtered_terms_per_entryid: list[list[int]]
+            Chỉ giữ entry có đủ các aspect.
+        valid_indices: list[int]
+            Index của các entry trong batch gốc.
+    """
+
+    return terms_per_entryid, range(len(terms_per_entryid))
+    
+    # required_aspects = set(required_aspects)
+
+    # filtered = []
+    # valid_indices = []
+
+    # for idx, term_indices in enumerate(terms_per_entryid):
+    #     # Lấy aspect thực tế của từng term trong entry
+    #     entry_aspects = {aspects_list[i] for i in term_indices}
+
+    #     # Check có ít nhất min_match trong required_aspects
+    #     if len(entry_aspects & required_aspects) >= min_match:
+    #         filtered.append(term_indices)
+    #         valid_indices.append(idx)
+
+    # return filtered, valid_indices
 
 def load_train():
-    protein_vocab, terms_vocab, info, ox_vocab, _, graph_masked, y, weights = get_vocab()
-    amino_axit = get_emb_amino(train_emb_npy)
+    protein_vocab, terms_vocab, info, ox_vocab, _, graph_masked, y, weights, aspects_list = get_vocab()
+    y, indices = filter_train(y, aspects_list, top_k_type)
+    amino_axit = np.concatenate((get_emb_amino(t5_train_emb_npy), get_emb_amino(esm_train_emb_npy)), axis=-1)[indices]
 
-    ox, _ = one_hot(info, ox_vocab)
+    ox, _ = one_hot(info[indices], ox_vocab)
 
     x = (amino_axit, ox)
 
     mask = build_mask(y, NUM_CLASSES, graph_masked)
 
-    return *x, y, mask, protein_vocab, terms_vocab, ox_vocab, weights[:NUM_CLASSES]
+    return *x, y, mask, protein_vocab, terms_vocab, ox_vocab, weights[:NUM_CLASSES], graph_masked
 
 def load_test():
-    protein_vocab, terms_vocab, _, ox_vocab, graph, graph_masked, _, _ = get_vocab()
-    test_vocab = build_proteins(test_seq_file, protein_path=0, split_character=' ')
+    protein_vocab, terms_vocab, _, ox_vocab, graph, graph_masked, _, _, _ = get_vocab()
+    test_vocab = build_test_proteins(test_seq_file)
     ox = build_ox_test(test_seq_file)
-    amino_axit = get_emb_amino(test_emb_npy)
+    amino_axit = np.concatenate((get_emb_amino(t5_test_emb_npy), get_emb_amino(esm_test_emb_npy)), axis=-1)
 
     ox_str = [str(x) for x in ox]
 

@@ -5,6 +5,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, random_split
 from tqdm import tqdm 
 from config import *
+from infer import build_graph_structures, compute_topo_order
 from loss import *
 from lr_schedule import MyScheduler
 from load_data import load_train
@@ -16,7 +17,7 @@ class Trainer:
     def __init__(self, model, train_dataloader, val_dataloader=None,
                  criterion=None, optimizer=None, scheduler=None,
                  device='cuda', log_step=50, val_step=500,
-                 model_save_path='best_model.pt', mask=None, top_k=None, weights=None):
+                 model_save_path='best_model.pt', mask=None, top_k=None, weights=None, graph_masked=None):
         self.model = model
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
@@ -35,6 +36,10 @@ class Trainer:
         self.global_step = 0
 
         self.model.to(self.device)
+
+        self.child_to_parent = graph_masked
+        self.parent_to_children = build_graph_structures(graph_masked)
+        self.topo_order = compute_topo_order(self.child_to_parent, self.parent_to_children)
 
         # Tổng số tham số
         total_params = sum(p.numel() for p in model.parameters())
@@ -111,9 +116,7 @@ class Trainer:
             # --- cuối epoch ---
             epoch_train_loss = running_loss / len(self.train_dataloader.dataset)
             if self.val_dataloader is not None:
-                epoch_val_loss = self.validate_and_save()
-                print(f"Epoch {epoch+1}/{num_epochs} finished, "
-                    f"Train Loss: {epoch_train_loss:.7f}, Val Loss: {epoch_val_loss:.7f}")
+                self.validate_and_save()
             else:
                 print(f"Epoch {epoch+1}/{num_epochs} finished, Train Loss: {epoch_train_loss:.7f}")
 
@@ -122,60 +125,38 @@ class Trainer:
         return self.model
     def validate_and_save(self):
         self.model.eval()
+        all_weights = torch.tensor(self.weights, device=self.device)  # [C_total]
 
-        # Chuyển toàn bộ weights lên device, list: [BP_weights, MF_weights, CC_weights]
-        all_weights = [torch.tensor(w, device=self.device) for w in self.weights]
+        topk_cumsum = [0] + list(torch.cumsum(torch.tensor(self.top_k), dim=0).numpy())  # [0, k1, k1+k2, ...]
 
-        # Weighted F1 từng subontology
-        weighted_f1_subont = []
-
-        # Tính các index để slice probs/labels/weights theo top_k
-        topk_cumsum = [0] + list(torch.cumsum(torch.tensor(self.top_k), dim=0).numpy())  # [0, k1, k1+k2, k_total]
+        tp_total = 0.0
+        pred_total = 0.0
+        actual_total = 0.0
 
         with torch.no_grad():
-            # Tạo tqdm chung cho toàn bộ dataloader
             for batch in tqdm(self.val_dataloader, desc="Validation"):
                 logits = self.get_loss(batch, return_loss=False)  # [B, C_total]
                 labels = batch[3].to(self.device)                 # [B, C_total]
-                mask = batch[2].to(self.device)                   # [B, C_total]
 
-                # Tính từng subontology
-                for sub_idx, k in enumerate(self.top_k):
-                    start, end = topk_cumsum[sub_idx], topk_cumsum[sub_idx+1]
-                    weights_sub = all_weights[sub_idx]
+                probs = torch.sigmoid(logits)  # [B, C_total]
 
-                    probs = torch.sigmoid(logits[:, start:end])
-                    labels_sub = labels[:, start:end]
-                    mask_sub = mask[:, start:end]
+                # --- Apply topological masking ---
+                # for term in self.topo_order:
+                #     parents = self.child_to_parent[term]
+                #     if len(parents) > 0:
+                #         parent_probs = probs[:, parents]
+                #         p_parent_exist = 1 - torch.prod(1 - parent_probs, dim=1)
+                #         probs[:, term] = probs[:, term] * p_parent_exist
 
-                    # Áp dụng mask
-                    probs_masked = probs * mask_sub
-                    labels_masked = labels_sub * mask_sub
+                # --- Weighted counts cho tất cả subontologies cùng lúc ---
+                tp_total += (probs * labels * all_weights).sum().item()
+                pred_total += (probs * all_weights).sum().item()
+                actual_total += (labels * all_weights).sum().item()
 
-                    # Weighted counts
-                    if len(weighted_f1_subont) <= sub_idx:
-                        # Khởi tạo
-                        weighted_f1_subont.append({
-                            "tp": 0.0,
-                            "pred": 0.0,
-                            "actual": 0.0
-                        })
-
-                    weighted_f1_subont[sub_idx]["tp"] += (probs_masked * labels_masked * weights_sub).sum().item()
-                    weighted_f1_subont[sub_idx]["pred"] += (probs_masked * weights_sub).sum().item()
-                    weighted_f1_subont[sub_idx]["actual"] += (labels_masked * weights_sub).sum().item()
-
-        # Sau khi duyệt hết batch, tính weighted F1 cho từng subontology
-        final_f1 = []
-        for sub_idx, counts in enumerate(weighted_f1_subont):
-            tp, pred, actual = counts["tp"], counts["pred"], counts["actual"]
-            precision = tp / (pred + 1e-12)
-            recall = tp / (actual + 1e-12)
-            f1 = 2 * precision * recall / (precision + recall + 1e-12)
-            final_f1.append(f1)
-
-        # Trung bình 3 subontologies
-        mean_weighted_f1 = sum(final_f1) / len(final_f1)
+        # --- Tính F1 ---
+        precision = tp_total / (pred_total + 1e-12)
+        recall = tp_total / (actual_total + 1e-12)
+        mean_weighted_f1 = 2 * precision * recall / (precision + recall + 1e-12)
 
         # Lưu model nếu tốt nhất
         if mean_weighted_f1 > self.best_val_f1:
@@ -218,7 +199,8 @@ if __name__ == "__main__":
     from HybridModel import HybridModel
     import torch.optim as optim
 
-    seq_data, feature_data, labels, mask, protein_vocab, term_vocab, ox_vocab, weights = load_train()
+    seq_data, feature_data, labels, mask, protein_vocab, term_vocab, ox_vocab, weights, graph_masked = load_train()
+    print("train_dataset_shape:", seq_data.shape)
     print(f"num_labels: {len(term_vocab)}")
     print(f"vocab_size: {len(protein_vocab)}")
     print(f"linear_input_dim: {len(ox_vocab)}")
@@ -271,7 +253,8 @@ if __name__ == "__main__":
             model_save_path=f"{model_dir}best_model_fold{fold}.pt",  # lưu model riêng cho từng fold
             mask=mask,
             top_k=top_k,
-            weights=weights
+            weights=weights,
+            graph_masked=graph_masked
         )
 
         trained_model = trainer.train(num_epochs=EPOCHS, accumulate_steps=GRADIENT_ACCUMULATION_STEPS)
